@@ -1,0 +1,1087 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PolarGrid — Hardware & Custom Test</title>
+<meta name="description" content="Run an interactive simulated Antarctic energy dispatch: change weather scenarios, pause time and inspect battery and fuel use.">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%228%22%20fill%3D%22%230f1b2e%22/%3E%3Cpath%20d%3D%22M18%204%208%2018h7l-1%2010%2010-15h-7z%22%20fill%3D%22%235eead4%22/%3E%3C/svg%3E">
+<script>
+/* Small local renderer for the simulation's line and stacked-bar charts. */
+class Chart {
+ constructor(canvas,config){this.canvas=canvas;this.config=config;this.draw();}
+ destroy(){}
+ draw(){
+ const c=this.canvas, cfg=this.config, sets=cfg.data.datasets, labels=cfg.data.labels;
+ const width=Math.max(280,c.parentElement.clientWidth),height=260,ratio=window.devicePixelRatio||1;
+ c.style.width='100%';c.style.height=height+'px';c.width=width*ratio;c.height=height*ratio;
+ c.setAttribute('role','img');c.setAttribute('aria-label',sets.map(s=>s.label).join(', '));
+ const g=c.getContext('2d');g.scale(ratio,ratio);const left=46,right=12,top=55,bottom=34,w=width-left-right,h=height-top-bottom;
+ const all=sets.flatMap(s=>s.data.filter(Number.isFinite));
+ if(cfg.type==='bar')for(let i=0;i<labels.length;i++)all.push(sets.filter(s=>s.type!=='line').reduce((n,s)=>n+(s.data[i]||0),0));
+ let min=Math.min(0,...all),max=Math.max(1,...all);max+=Math.max(1,(max-min)*.08);
+ const y=v=>top+h-(v-min)/(max-min)*h,x=i=>left+(i+.5)/labels.length*w;
+ g.font='11px sans-serif';let lx=left,ly=13;
+ for(const s of sets){const label=s.label;if(lx+g.measureText(label).width+25>width){lx=left;ly+=16;}g.fillStyle=s.borderColor||s.backgroundColor;g.fillRect(lx,ly-7,8,8);g.fillStyle='#a8bdd0';g.fillText(label,lx+13,ly);lx+=g.measureText(label).width+29;}
+ for(let j=0;j<=4;j++){const val=min+(max-min)*j/4;g.strokeStyle='#22384f';g.beginPath();g.moveTo(left,y(val));g.lineTo(width-right,y(val));g.stroke();g.fillStyle='#a8bdd0';g.textAlign='right';g.fillText(val.toFixed(0),left-7,y(val)+4);}g.textAlign='center';
+ const stride=Math.max(1,Math.ceil(labels.length/(width<500?5:10)));for(let i=0;i<labels.length;i+=stride)g.fillText(labels[i],x(i),height-12);
+ if(cfg.type==='bar'){for(let i=0;i<labels.length;i++){let sum=0;for(const s of sets.filter(s=>s.type!=='line')){const val=s.data[i]||0;g.fillStyle=s.backgroundColor;g.fillRect(x(i)-w/labels.length*.35,y(sum+val),w/labels.length*.7,y(sum)-y(sum+val));sum+=val;}}}
+ for(const s of sets.filter(s=>cfg.type!=='bar'||s.type==='line')){g.strokeStyle=s.borderColor;g.lineWidth=2;g.setLineDash(s.borderDash||[]);g.beginPath();let active=false;s.data.forEach((v,i)=>{if(!Number.isFinite(v)){active=false;return;}if(active)g.lineTo(x(i),y(v));else{g.moveTo(x(i),y(v));active=true;}});g.stroke();}g.setLineDash([]);
+ }
+}
+
+</script>
+<style>
+ :root{
+  --bg:#070d1a; --panel:#0f1b2e; --panel2:#132540; --line:#22384f;
+  --ink:#e7f1fa; --dim:#87a0b8; --faint:#5c7590;
+  --teal:#5eead4; --teal-dk:#2f6b62;
+  --amber:#f5a623; --violet:#a78bfa; --ice:#8fd0ff;
+  --diesel:#f2664f; --batt:#5eead4;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+ }
+ *{box-sizing:border-box;}
+ html{scroll-padding-top:env(safe-area-inset-top,0px);}
+ body{
+  margin:0; background:
+   radial-gradient(1200px 500px at 12% -10%, rgba(94,234,212,.07), transparent 60%),
+   radial-gradient(900px 400px at 88% 0%, rgba(167,139,250,.06), transparent 55%), var(--bg);
+  color:var(--ink); font-family:'IBM Plex Sans',sans-serif; -webkit-font-smoothing:antialiased;
+  padding:28px 18px 60px;
+ }
+ .wrap{max-width:1140px;margin:0 auto;}
+ h1,h2,h3,h4{font-family:'Space Grotesk',sans-serif;margin:0;letter-spacing:-.01em;}
+ code,.mono{font-family:'IBM Plex Mono',monospace;}
+
+ header{margin-bottom:22px;}
+ .eyebrow{color:var(--teal);font-size:12.5px;margin:0 0 8px;}
+ h1{font-size:30px;font-weight:700;color:#fff;}
+ header p{color:var(--dim);font-size:14px;margin:10px 0 0;max-width:660px;line-height:1.6;}
+
+ /* source bar */
+ .source-bar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:11px 15px;margin-bottom:18px;}
+ .toggle{display:flex;gap:5px;background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:3px;}
+ .toggle button{border:none;background:transparent;color:var(--dim);font-family:inherit;font-size:12.5px;
+  font-weight:600;padding:7px 14px;border-radius:7px;cursor:pointer;transition:.15s;}
+ .toggle button.active{background:var(--teal);color:#04211c;}
+ .status{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dim);}
+ .status .pip{width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0;}
+ .status.live .pip{background:var(--teal);box-shadow:0 0 0 3px rgba(94,234,212,.18);}
+ .status.warn .pip{background:var(--amber);box-shadow:0 0 0 3px rgba(245,166,35,.18);}
+
+ /* headline decision */
+ .decision{background:linear-gradient(135deg,var(--panel2),var(--panel));border:1px solid var(--teal-dk);
+  border-radius:16px;padding:24px;margin-bottom:20px;}
+ .decision .lbl{font-size:12px;color:var(--teal);margin-bottom:12px;font-weight:600;}
+ .mixbar{display:flex;height:42px;border-radius:9px;overflow:hidden;border:1px solid var(--line);}
+ .mixbar div{display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600;
+  color:#04211c;transition:width .4s;}
+ .mixlegend{display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;font-size:12.5px;color:var(--dim);}
+ .mixlegend span{display:flex;align-items:center;gap:6px;}
+ .mixlegend i{width:10px;height:10px;border-radius:3px;display:inline-block;}
+ .rationale{margin-top:16px;padding-top:14px;border-top:1px solid var(--line);font-size:13px;
+  color:var(--ink);line-height:1.6;}
+ .rationale b{color:var(--teal);}
+
+ /* stat grid */
+ .grid{display:grid;gap:12px;margin-bottom:20px;}
+ .g4{grid-template-columns:repeat(4,1fr);}
+ .g3{grid-template-columns:repeat(3,1fr);}
+ @media(max-width:860px){.g4{grid-template-columns:repeat(2,1fr);}.g3{grid-template-columns:1fr;}}
+ @media(max-width:520px){.g4{grid-template-columns:1fr;}}
+ .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 17px;}
+ .stat .k{font-size:11.5px;color:var(--dim);margin-bottom:6px;}
+ .stat .v{font-size:24px;font-weight:600;font-family:'Space Grotesk',sans-serif;}
+ .stat .s{font-size:11.5px;color:var(--faint);margin-top:4px;line-height:1.4;}
+
+ /* panels */
+ .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:19px 21px;margin-bottom:16px;}
+ .ph{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:6px;}
+ .ph h3{font-size:15px;}
+ .ph .tag{font-size:11px;color:var(--dim);border:1px solid var(--line);padding:3px 9px;border-radius:20px;}
+ .note{font-size:12px;color:var(--dim);margin-top:10px;line-height:1.55;}
+ .note b{color:var(--ink);}
+ .chartbox{position:relative;margin-top:10px;overflow-x:auto;}
+
+ /* alerts */
+ .alert{display:flex;gap:11px;align-items:flex-start;border-radius:11px;padding:13px 15px;margin-top:9px;
+  border:1px solid var(--line);background:rgba(255,255,255,.02);}
+ .alert .dot{width:8px;height:8px;border-radius:50%;margin-top:6px;flex-shrink:0;background:var(--dim);}
+ .alert p{margin:0;font-size:13px;line-height:1.55;}
+ .alert p span{color:var(--dim);}
+ .alert.ok{border-color:var(--teal-dk);} .alert.ok .dot{background:var(--teal);}
+ .alert.warn{border-color:#6b5320;} .alert.warn .dot{background:var(--amber);}
+ .alert.crit{border-color:#7a3328;} .alert.crit .dot{background:var(--diesel);}
+
+ /* table */
+ table{width:100%;border-collapse:collapse;margin-top:12px;font-size:12.5px;}
+ th{text-align:left;color:var(--dim);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);font-size:11.5px;}
+ td{padding:8px 10px;border-bottom:1px solid #16283d;color:var(--ink);}
+ td.num{font-family:'IBM Plex Mono',monospace;}
+ tr:hover td{background:rgba(255,255,255,.02);}
+
+ /* config */
+ details{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 20px;margin-bottom:16px;}
+ summary{cursor:pointer;font-family:'Space Grotesk',sans-serif;font-size:15px;color:var(--ink);}
+ .cfg{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:16px;}
+ @media(max-width:860px){.cfg{grid-template-columns:1fr;}}
+ .cfg label{display:block;font-size:11.5px;color:var(--dim);margin-bottom:5px;}
+ .cfg input{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:7px;color:var(--ink);
+  padding:8px 10px;font-family:'IBM Plex Mono',monospace;font-size:12.5px;}
+ .cfg input:focus{outline:none;border-color:var(--teal-dk);}
+ .btn{background:var(--teal);color:#04211c;border:none;border-radius:8px;padding:9px 18px;font-family:inherit;
+  font-weight:600;font-size:13px;cursor:pointer;margin-top:16px;}
+ .cfg-error{color:var(--diesel);font-size:12px;margin:10px 0 0;}
+ .btn.ghost{background:transparent;color:var(--dim);border:1px solid var(--line);margin-left:8px;}
+
+ /* arch */
+ .arch{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:14px;}
+ @media(max-width:860px){.arch{grid-template-columns:1fr;}}
+ .arch .step{border-left:2px solid var(--teal-dk);padding-left:12px;}
+ .arch .step .k{font-size:11px;color:var(--teal);font-weight:600;margin-bottom:5px;}
+ .arch .step .v{font-size:12.5px;color:var(--dim);line-height:1.5;}
+ .endpoint{margin-top:14px;font-size:12px;color:var(--dim);background:var(--bg);border:1px solid var(--line);
+  border-radius:8px;padding:10px 12px;line-height:1.6;}
+ .endpoint code{color:var(--teal);}
+
+ footer{margin-top:26px;font-size:12px;color:var(--faint);line-height:1.7;border-top:1px solid var(--line);padding-top:16px;}
+.sim-controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px}.sim-controls .btn{margin:0}.sim-controls label{display:flex;align-items:center;gap:8px;font-size:14px}.sim-controls select{background:var(--bg);color:var(--ink);padding:10px;border:1px solid var(--line);border-radius:8px;font:inherit}button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--teal);outline-offset:3px}.stat{min-width:0}.endpoint{overflow-wrap:anywhere}@media(max-width:520px){body{padding:18px 12px 40px}.panel,.decision{padding:16px}.sim-controls label{width:100%}.sim-controls select{flex:1;min-width:0}.chartbox{min-height:170px}.chartbox canvas{min-height:170px}}
+[hidden]{display:none!important} .toggle{flex-wrap:wrap}.toggle button{min-height:44px}.cfg input{font-size:14px} .note{overflow-wrap:anywhere}
+ .backend-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.backend-actions input[type=file]{max-width:320px;color:var(--dim);font:inherit}.backend-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:12px}.backend-metrics .mini{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px}.backend-metrics .mini b{display:block;font-size:18px;color:var(--ink);margin-top:4px}.approval-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}.approval-row input{background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--ink);padding:10px 12px;min-width:220px}@media(max-width:860px){.backend-metrics{grid-template-columns:1fr 1fr}}@media(max-width:520px){.backend-metrics{grid-template-columns:1fr}.backend-actions>*{width:100%}.approval-row input{width:100%}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>PolarGrid <span style="font-size:16px;color:var(--teal)">ENERGY LAB</span></h1>
+ <p>Connect your station gateway for live readings, or configure a test and run a simulation. Dispatch and fuel forecasts are modelled recommendations.</p>
+</header>
+
+<section class="panel">
+ <div class="toggle" role="group" aria-label="Data mode"><button id="modeHardware" class="active" aria-pressed="true" onclick="chooseMode('hardware')">1 · Connect live hardware</button><button id="modeTest" aria-pressed="false" onclick="chooseMode('test')">2 · Configure &amp; test</button></div>
+ <p class="note" id="modeStatus" role="status">Hardware mode · disconnected. Enter the gateway URL and connect.</p>
+ <div id="hardwareSetup">
+ <div class="cfg"><div style="grid-column:1/-1"><label for="gatewayUrl">Telemetry endpoint URL</label><input id="gatewayUrl" type="url" placeholder="http://192.168.1.100/api/telemetry" autocomplete="off"></div></div>
+ <button class="btn" id="connectButton" onclick="connectHardware()">Connect hardware</button><button class="btn ghost" onclick="disconnectHardware()">Disconnect</button>
+ <p class="note">Reads every 5 seconds. The gateway must expose an HTTP/HTTPS JSON endpoint and permit this page through CORS. This page reads telemetry only; it does not send control commands to equipment.</p>
+ <details><summary>Gateway response format</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{"timestamp":"2026-09-25T12:00:00Z","loadKw":100,"solarWm2":400,"windKmh":30,"tempC":-15,"soc":68,"fuelLitres":41000}</pre><p class="note">Return a fresh ISO timestamp on every reading (no more than 2 minutes old). Units: kW, W/m², km/h, °C, battery %, litres. Forecasts use the latest reading as a starting point; they are not historical sensor measurements.</p></details>
+ </div>
+ <div id="customSetup" hidden>
+ <p class="note">Set the equipment values below and the test conditions here, then press Start custom test. Custom inputs stay constant during the test; the battery and fuel tank evolve each hour.</p>
+ <div class="cfg">
+  <div><label for="testLoad">Demand (kW)</label><input id="testLoad" type="number" min="0" value="100"></div>
+  <div><label for="testTemp">Temperature (°C)</label><input id="testTemp" type="number" value="-15"></div>
+  <div><label for="testSolar">Solar irradiance (W/m²)</label><input id="testSolar" type="number" min="0" max="1500" value="400"></div>
+  <div><label for="testWind">Wind speed (km/h)</label><input id="testWind" type="number" min="0" value="30"></div>
+ </div>
+ <button class="btn" onclick="startCustomTest()">Start custom test</button>
+ </div>
+</section>
+
+<section class="panel" id="backendPanel">
+ <div class="ph"><h3>AI backend &amp; evidence pipeline</h3><span class="tag">stored history · ML forecast · operator review</span></div>
+ <p class="note">This layer turns the dashboard into a testable project prototype: import or collect hourly telemetry, evaluate a load-forecast model chronologically, generate a 24-hour predictive dispatch, then log an operator decision. Approval is an audit record only — no generator or inverter command is sent.</p>
+ <p class="note" id="backendStatus" role="status">Checking Python backend…</p>
+ <div class="backend-actions">
+ <input id="historyCsv" type="file" accept=".csv,text/csv" aria-label="Telemetry CSV file">
+ <button class="btn" onclick="importHistoryCsv()">Import telemetry CSV</button>
+ <button class="btn ghost" onclick="trainBackendAI()">Train / evaluate AI</button>
+ <button class="btn ghost" onclick="generateBackendPlan()">Generate AI plan</button>
+ <button class="btn ghost" onclick="downloadBackendCsv()">Export stored telemetry</button>
+ </div>
+ <div class="backend-metrics" id="backendMetrics">
+ <div class="mini"><span class="note">Stored readings</span><b id="bmRows">—</b></div>
+ <div class="mini"><span class="note">Selected forecaster</span><b id="bmModel">—</b></div>
+ <div class="mini"><span class="note">Final-test AI MAE</span><b id="bmAiMae">—</b></div>
+ <div class="mini"><span class="note">Final-test baseline MAE</span><b id="bmBaseMae">—</b></div>
+ </div>
+ <div id="backendForecastBox" hidden style="margin-top:16px">
+ <p class="note" id="backendForecastNote"></p>
+ <div style="overflow-x:auto"><table id="backendForecastTable"></table></div>
+ </div>
+ <div id="backendPlanBox" hidden style="margin-top:16px">
+ <p class="note" id="backendPlanSummary"></p>
+ <div style="overflow-x:auto"><table id="backendPlanTable"></table></div>
+ <div class="approval-row">
+  <input id="operatorName" value="Demo operator" aria-label="Operator name">
+  <input id="operatorNote" placeholder="Optional review note" aria-label="Operator review note">
+  <button class="btn" onclick="logBackendDecision('approved')">Approve recommendation</button>
+  <button class="btn ghost" onclick="logBackendDecision('rejected')">Reject recommendation</button>
+ </div>
+ <p class="note" id="approvalStatus">No operator decision logged for this plan.</p>
+ </div>
+ <details style="margin-top:16px"><summary>CSV format for training data</summary><p class="note">Header: <code>timestamp,loadKw,solarWm2,windKmh,tempC,soc,fuelLitres</code>. Historical timestamps are accepted. The backend aggregates readings to hourly values before training. At least 72 hourly readings are required; a week or more is recommended.</p></details>
+</section>
+<!-- ============ CONFIG ============ -->
+<details id="configDetails" open>
+ <summary>Station equipment and constraints</summary>
+ <p class="note" style="margin-top:10px">Enter the equipment ratings and constraints. Apply these values before connecting, or use them to start a custom test.</p>
+ <div class="cfg" id="cfgGrid"></div>
+ <p id="cfgError" class="cfg-error" role="alert" hidden></p>
+ <button class="btn" onclick="applyConfig()">Apply settings</button>
+ <button class="btn ghost" onclick="resetConfig()">Reset defaults</button>
+</details>
+
+<section id="comparisonPanel" class="panel" hidden>
+ <div class="ph"><h3>Predictive planner · fair comparison</h3><span class="tag">24 hours · modelled results</span></div>
+ <p class="note">Compare a simple renewables → battery → diesel rule with a planner that considers all 24 hours. The planner must finish with exactly the same battery energy as the simple rule. It prioritizes serving demand, then minimizes fuel.</p>
+ <div class="sim-controls"><label>Test case <select id="compareScenario"><option value="custom">My custom conditions (constant)</option><option value="storm">Storm ahead (varying demo)</option><option value="winter">Winter demand (varying demo)</option><option value="summer">Summer renewables (varying demo)</option></select></label><button class="btn" onclick="runComparison()">Compare strategies</button></div>
+ <p class="note">Custom conditions use your inputs above. Demo cases replace load and weather with illustrative hourly profiles; your equipment settings still apply. Comparing pauses the running test.</p>
+ <p id="comparisonMessage" role="status" class="note">Configure your equipment and test conditions, then compare.</p>
+ <div id="comparisonOutput" hidden>
+ <div style="overflow-x:auto"><table id="comparisonMetrics"></table></div>
+ <div class="chartbox"><canvas id="comparisonChart"></canvas></div>
+ <p class="note" id="plannerExplanation"></p><p class="note" id="comparisonAssumptions"></p>
+ <button class="btn ghost" onclick="exportComparison()">Download hourly evidence CSV</button>
+ </div>
+ <details style="margin-top:16px"><summary>Model assumptions and limits</summary><p class="note">This comparison uses a shared battery model with charging losses and a fixed capacity based on the coldest forecast hour. It allows surplus renewable energy to charge the battery; the renewable cap applies to direct load supply. The simple rule also uses excess minimum-load generator output to charge the battery when possible. Any remaining excess may be dumped and is logged. Generator ramping, startup costs, battery wear, and forecast uncertainty are not modelled. The planner searches a finite battery-energy grid; this is not a guarantee of a continuous global optimum. Predictions assume the forecast is correct and fuel remains available. The exported record supports checking this simulation, not certifying real station savings. The dashboard below retains its original simplified dispatch model.</p></details>
+</section>
+<div id="results" hidden>
+<section id="hardwareReadings" class="grid g4" hidden>
+ <div class="stat"><div class="k">Measured demand</div><div class="v" id="liveLoad">—</div></div>
+ <div class="stat"><div class="k">Measured battery charge</div><div class="v" id="liveSoc">—</div></div>
+ <div class="stat"><div class="k">Measured temperature</div><div class="v" id="liveTemp">—</div></div>
+ <div class="stat"><div class="k">Measured fuel remaining</div><div class="v" id="liveFuel">—</div></div>
+</section>
+<section id="testControls" class="source-bar" aria-label="Simulation controls">
+ <div class="sim-controls">
+  <button class="btn" id="playButton" onclick="toggleSimulation()">Pause</button>
+  <button class="btn ghost" onclick="stepSimulation()">Step 1 hour</button>
+  <button class="btn ghost" onclick="restartSimulation()">Restart</button>
+  <label>Speed <select id="speed" onchange="changeSpeed()"><option value="4000">1 hour / 4 sec</option><option value="2000" selected>1 hour / 2 sec</option><option value="800">1 hour / 0.8 sec</option></select></label>
+  <label>Scenario <select id="scenario" onchange="restartSimulation()"><option value="custom" selected>Custom inputs</option><option value="normal">Typical conditions</option><option value="summer">Summer sun</option><option value="winter">Polar night</option><option value="storm">Storm · turbine cutout</option><option value="peak">High demand</option></select></label>
+ </div>
+ <div class="status live"><span class="pip"></span><span id="simClock" role="status">Starting simulation…</span></div>
+ <p class="note" style="margin:0">One step advances one simulated hour. Scenario changes restart the run; configuration changes apply to the next forecast.</p>
+</section>
+<section id="testTotals" class="grid g3" aria-label="Simulation totals">
+ <div class="stat"><div class="k">Elapsed simulated time</div><div class="v" id="elapsed">0 h</div><div class="s">Updates while this page is visible</div></div>
+ <div class="stat"><div class="k">Fuel consumed this run</div><div class="v" id="consumed">0 L</div><div class="s">Accumulated hourly generator consumption</div></div>
+ <div class="stat"><div class="k">Current battery charge</div><div class="v" id="currentSoc">68%</div><div class="s">Carried forward between simulation steps</div></div>
+</section>
+<!-- ============ LAYER 3: THE DECISION ============ -->
+<div class="decision">
+ <div class="lbl">RECOMMENDED DISPATCH — NEXT HOUR</div>
+ <div class="mixbar" id="mixbar"></div>
+ <div class="mixlegend">
+  <span><i style="background:var(--amber)"></i>Solar</span>
+  <span><i style="background:var(--violet)"></i>Wind</span>
+  <span><i style="background:var(--batt)"></i>Battery</span>
+  <span><i style="background:var(--diesel)"></i>Diesel</span>
+ </div>
+ <div class="rationale" id="rationale"></div>
+</div>
+
+<div class="grid g4">
+ <div class="stat"><div class="k">Forecast load (next hour)</div><div class="v" id="sLoad">—</div><div class="s" id="sLoadSub">—</div></div>
+ <div class="stat"><div class="k">Renewable share</div><div class="v" id="sRen" style="color:var(--teal)">—</div><div class="s">of next-hour demand</div></div>
+ <div class="stat"><div class="k">Battery state of charge</div><div class="v" id="sSoc" style="color:var(--ice)">—</div><div class="s" id="sSocSub">—</div></div>
+ <div class="stat"><div class="k">Fuel remaining</div><div class="v" id="sFuel" style="color:var(--amber)">—</div><div class="s" id="sFuelSub">—</div></div>
+</div>
+
+<!-- ============ FUEL OPTIMIZATION RESULT ============ -->
+<div class="panel">
+ <div class="ph"><h3>Fuel optimization — 24 hour projection</h3><span class="tag">vs. diesel-only baseline</span></div>
+ <div class="grid g3" style="margin:14px 0 0">
+  <div class="stat"><div class="k">Diesel-only baseline</div><div class="v" id="fBase" style="color:var(--diesel)">—</div><div class="s">litres / 24h if generators ran alone</div></div>
+  <div class="stat"><div class="k">PolarGrid optimized</div><div class="v" id="fOpt" style="color:var(--teal)">—</div><div class="s">litres / 24h with AI dispatch</div></div>
+  <div class="stat"><div class="k">Saved</div><div class="v" id="fSave" style="color:var(--teal)">—</div><div class="s" id="fSaveSub">—</div></div>
+ </div>
+ <div class="chartbox"><canvas id="dispatchChart" height="95"></canvas></div>
+ <div class="note"><b>How this is computed:</b> for each of the next 24 hours the engine serves forecast load from renewables first, then battery (down to the safety reserve), then diesel — respecting the generator's minimum loading limit and the renewable penetration cap. Fuel is derived from the genset's linear consumption curve, so the projection is traceable to the hourly dispatch. Generator output above the load may charge the battery or be unused.</div>
+</div>
+
+<!-- ============ ALERTS / SAFETY ============ -->
+<div class="panel">
+ <div class="ph"><h3>System advisories</h3><span class="tag">safety-first</span></div>
+ <div id="alerts"></div>
+</div>
+
+<!-- ============ LAYER 1: FORECASTS ============ -->
+<div class="panel">
+ <div class="ph"><h3>Load forecast</h3><span class="tag">24h ahead</span></div>
+ <div class="chartbox"><canvas id="loadChart" height="80"></canvas></div>
+ <div class="note"><b>Drivers:</b> base station load, heating demand (temperature-driven), crew occupancy, and scheduled scientific instrument load. Heating dominates in winter.</div>
+</div>
+
+<div class="panel">
+ <div class="ph"><h3>Renewable supply forecast</h3><span class="tag">24h ahead</span></div>
+ <div class="chartbox"><canvas id="renChart" height="80"></canvas></div>
+ <div class="note"><b>Solar</b> = irradiance × array area × efficiency, reduced by snow/ice soiling losses. <b>Wind</b> uses a turbine power curve with cut-in, rated and cut-out speeds — output is zero outside that band, which is why wind can drop to nothing in a storm.</div>
+</div>
+
+<div class="panel">
+ <div class="ph"><h3>Weather forecast</h3><span class="tag">7 days · exponential smoothing + seasonal baseline</span></div>
+ <div class="chartbox"><canvas id="wxChart" height="80"></canvas></div>
+ <div class="note"><b>Method:</b> Holt's linear exponential smoothing on recent history, blended with a seasonal baseline derived from the station's latitude so the forecast can't drift away from physically plausible values. Chosen over a neural net because it stays stable on small datasets and every output can be explained.</div>
+</div>
+
+<!-- ============ HOURLY TABLE ============ -->
+<div class="panel">
+ <div class="ph"><h3>Hourly dispatch plan</h3><span class="tag">next 12 hours</span></div>
+ <div style="overflow-x:auto"><table id="planTable"></table></div>
+</div>
+
+<!-- ============ ANNUAL CONTEXT ============ -->
+<div class="panel">
+ <div class="ph"><h3>Annual daylight cycle</h3><span class="status" id="seasonStatus" style="font-size:12.5px"></span></div>
+ <div style="position:relative;height:34px;margin-top:14px;border-radius:8px;overflow:hidden;border:1px solid var(--line);
+  background:linear-gradient(90deg,#050a14 0%,#0a1830 15%,#123152 30%,#1b4a6e 45%,#f5a62333 55%,#f5a62388 62%,#ffe6a8 70%,#f5a62388 78%,#123152 88%,#050a14 100%);">
+  <div id="todayMark" style="position:absolute;top:-4px;width:2px;height:42px;background:#fff;"></div>
+ </div>
+ <div style="display:flex;justify-content:space-between;margin-top:8px;font-size:11px;color:var(--dim);">
+  <span>Jan</span><span>Mar</span><span>Jun — Polar Night</span><span>Sep</span><span>Dec — Polar Day</span>
+ </div>
+ <div class="note">Solar is effectively a seasonal on/off switch here, not a daily curve. Through polar night the dispatch engine has no solar to allocate at all — which is exactly when fuel discipline matters most.</div>
+</div>
+
+</div>
+<footer>
+ <b>Prototype scope.</b> Simulated telemetry stands in for real station sensor history, which is not public. The forecasting, dispatch and fuel-accounting logic is real and runs on whatever data it is given — hardware mode uses gateway readings only after a successful connection. Custom test mode uses the inputs you supply. Connection failures never switch to simulated data. Fuel figures derive from a standard linear genset consumption curve and are intended to demonstrate the method, not to certify a specific saving at Bharati or Maitri.
+</footer>
+
+</div>
+
+<script>
+/* =====================================================================
+  POLARGRID — AI ENERGY MANAGEMENT SYSTEM (PROTOTYPE)
+  =====================================================================
+  Module map — each block is independent and upgradeable in isolation:
+   [1] CONFIG    station constants, all tunables in one place
+   [2] DATA LAYER  fetchTelemetry() — the ONLY simulated/live seam
+   [3] FORECAST   weather (Holt's) + load model
+   [4] SUPPLY    solar & wind conversion models
+   [5] DISPATCH   the decision engine (merit-order + constraints)
+   [6] FUEL     genset consumption curve + savings accounting
+   [7] RENDER    UI only — contains no business logic
+  Upgrade path: replace [3] with an LSTM, or [5] with reinforcement
+  learning, without touching any other block.
+  ===================================================================== */
+
+/* ---------- [1] CONFIG ---------- */
+const DEFAULTS = {
+ latitude:    69.4,  // Bharati Station, °S
+ crewSummer:   46,
+ crewWinter:   23,
+ baseLoadKw:   38,   // always-on: comms, control, lighting
+ perCrewKw:    0.45,  // galley, quarters, water per person
+ scienceKw:    22,   // scheduled instrument load
+ heatCoeffKwPerC: 1.9,  // heating kW added per °C below indoor setpoint
+ indoorSetpointC: 18,
+ solarAreaM2:   420,  // PV array
+ solarEff:    0.19,
+ soilingLoss:   0.18,  // snow/ice/frost derate
+ windRatedKw:   60,   // turbine nameplate
+ windCutInKmh:  11,
+ windRatedKmh:  43,
+ windCutOutKmh:  90,
+ battCapacityKwh: 480,
+ battStartSoc:  68,   // %
+ battMinSoc:   35,   // safety reserve — never dispatch below this
+ battMaxRateKw:  120,
+ battColdDerate: 0.014, // capacity fraction lost per °C below 0
+ gensetRatedKw:  160,
+ gensetMinLoad:  0.30,  // min loading to avoid wet-stacking
+ fuelIdleCoeff:  0.08,  // L/h per rated kW (no-load)
+ fuelLoadCoeff:  0.245, // L/h per output kW
+ fuelLitres:   41000, // tank on hand
+ daysToResupply: 240,
+ renPenetrationCap:0.75  // max instantaneous renewable share (grid stability)
+};
+let CFG = {...DEFAULTS};
+
+const HIST_DAYS = 14, FORE_DAYS = 7, PLAN_HOURS = 24;
+let now = new Date();
+let dayOfYear = Math.floor((now - new Date(now.getFullYear(),0,1))/86400000);
+
+/* ---------- [2] DATA LAYER — the simulated/live seam ---------- */
+/* ---------- [3a] SEASONAL PHYSICS (drives the simulator + forecast floor) ---------- */
+function daylightHours(doy){
+ return Math.max(0, Math.min(24, 12 + 12*Math.cos((doy-355)/365.25*2*Math.PI)));
+}
+function seasonalTemp(doy){ return -11.5 + 10.5*Math.cos((doy-355)/365.25*2*Math.PI); }
+function seasonalWind(doy){ return 26 + 6*Math.sin((doy-90)/365.25*2*Math.PI); }
+function seasonalSolar(doy){ return Math.max(0, (daylightHours(doy)/24)*780); }
+function noise(seed){ const x=Math.sin(seed*12.9898)*43758.5453; return x-Math.floor(x); }
+
+function simulate(){
+ const labels=[], solar=[], wind=[], temp=[];
+ for(let i=-HIST_DAYS+1;i<=0;i++){
+  const doy=(dayOfYear+i+365)%365;
+  const d=new Date(now); d.setDate(now.getDate()+i);
+  labels.push(d.toLocaleDateString('en-GB',{day:'2-digit',month:'short'}));
+  solar.push(Math.max(0, seasonalSolar(doy)*(0.75+0.5*noise(doy*3.1))));
+  wind .push(Math.max(2, seasonalWind(doy)*(0.7+0.6*noise(doy*7.7))));
+  temp .push(seasonalTemp(doy)+(noise(doy*5.3)-0.5)*6);
+ }
+ return {labels, solar, wind, temp, soc:CFG.battStartSoc, fuelLitres:CFG.fuelLitres};
+}
+
+/* ---------- [3b] WEATHER FORECAST — Holt's linear exponential smoothing ---------- */
+function holt(series, steps, alpha=0.4, beta=0.25){
+ let level=series[0], trend=series[1]-series[0];
+ for(let i=1;i<series.length;i++){
+  const prev=level;
+  level = alpha*series[i] + (1-alpha)*(level+trend);
+  trend = beta*(level-prev) + (1-beta)*trend;
+ }
+ return Array.from({length:steps},(_,s)=>level+trend*(s+1));
+}
+
+function forecastWeather(hist){
+ const rs=holt(hist.solar,FORE_DAYS), rw=holt(hist.wind,FORE_DAYS), rt=holt(hist.temp,FORE_DAYS);
+ const labels=[], solar=[], wind=[], temp=[];
+ for(let i=1;i<=FORE_DAYS;i++){
+  const doy=(dayOfYear+i)%365;
+  const d=new Date(now); d.setDate(now.getDate()+i);
+  labels.push(d.toLocaleDateString('en-GB',{day:'2-digit',month:'short'}));
+  // blend projection with seasonal baseline so it cannot drift implausibly
+  solar.push(Math.max(0, 0.55*rs[i-1] + 0.45*seasonalSolar(doy)));
+  wind .push(Math.max(2, 0.55*rw[i-1] + 0.45*seasonalWind(doy)));
+  temp .push(0.55*rt[i-1] + 0.45*seasonalTemp(doy));
+ }
+ return {labels, solar, wind, temp};
+}
+
+/* ---------- [3c] HOURLY PROFILES for the next 24h ---------- */
+function hourlyProfile(hist, wx){
+ const hrs=[];
+ const dl = daylightHours(dayOfYear);
+ const crew = dl > 14 ? CFG.crewSummer : CFG.crewWinter;  // proxy for summer/winter season
+ const baseTemp = hist.temp[hist.temp.length-1];
+ const tempTomorrow = wx.temp[0];
+
+ for(let h=0;h<PLAN_HOURS;h++){
+  const clock = (now.getHours()+h+1)%24;
+  // temperature: interpolate toward tomorrow + mild diurnal swing
+  const t = baseTemp + (tempTomorrow-baseTemp)*(h/PLAN_HOURS) + 1.6*Math.sin((clock-14)/24*2*Math.PI);
+
+  // --- solar irradiance: only within the daylight window ---
+  const sunUp = dl >= 23.5 || (dl > 0.5 && Math.abs(clock-12) <= dl/2);
+  const solarPeak = hist.solar[hist.solar.length-1];
+  const angle = Math.cos((clock-12)/Math.max(dl,1)*Math.PI);
+  const irr = (sunUp && dl>0.5) ? Math.max(0, solarPeak*Math.max(0,angle)*1.15) : 0;
+
+  // --- wind: persistence + short-term variability ---
+  const w = Math.max(0, hist.wind[hist.wind.length-1]*(0.85+0.3*noise((h+1)*11.3)));
+
+  // --- LOAD MODEL: base + crew + science(scheduled) + heating(temperature-driven) ---
+  const heating = Math.max(0, (CFG.indoorSetpointC - t) * CFG.heatCoeffKwPerC);
+  const scienceOn = (clock>=6 && clock<=22) ? CFG.scienceKw : CFG.scienceKw*0.55;
+  const crewActive = (clock>=7 && clock<=23) ? 1 : 0.6;
+  const load = CFG.baseLoadKw + crew*CFG.perCrewKw*crewActive + scienceOn + heating;
+
+  hrs.push({h, clock, temp:t, irr, wind:w, load});
+ }
+ return {hrs, crew};
+}
+
+/* ---------- [4] SUPPLY MODELS ---------- */
+function solarKw(irr){
+ return Math.max(0, irr * CFG.solarAreaM2 * CFG.solarEff * (1-CFG.soilingLoss) / 1000);
+}
+function windKw(kmh){
+ if(kmh < CFG.windCutInKmh || kmh >= CFG.windCutOutKmh) return 0;  // outside the band = nothing
+ if(kmh >= CFG.windRatedKmh) return CFG.windRatedKw;
+ const f = (kmh-CFG.windCutInKmh)/(CFG.windRatedKmh-CFG.windCutInKmh);
+ return CFG.windRatedKw * Math.pow(f,3);              // cubic region of the power curve
+}
+function battUsableKwh(tempC){
+ const derate = tempC < 0 ? Math.max(0.55, 1 - Math.abs(tempC)*CFG.battColdDerate) : 1;
+ return CFG.battCapacityKwh * derate;
+}
+
+/* ---------- [6] FUEL MODEL — linear genset consumption curve ---------- */
+function fuelLph(outputKw){
+ if(outputKw <= 0) return 0;
+ return CFG.fuelIdleCoeff*CFG.gensetRatedKw + CFG.fuelLoadCoeff*outputKw;
+}
+
+/* ---------- [5] DISPATCH ENGINE — the decision layer ----------
+  Merit order: renewables → battery (to reserve) → diesel.
+  Constraints enforced, in priority order:
+   C1 battery never discharged below battMinSoc (life-safety reserve)
+   C2 diesel never run below gensetMinLoad (prevents wet-stacking)
+   C3 instantaneous renewable share capped (grid stability)
+  Every hour's numbers are produced here and nowhere else, so any
+  figure in the UI can be traced back to this loop.       */
+function dispatch(profile){
+ let soc = profile.initialSoc ?? CFG.battStartSoc;
+ const plan=[];
+ let optFuel=0, baseFuel=0;
+
+ for(const hr of profile.hrs){
+  const usable = battUsableKwh(hr.temp);
+  const load = hr.load;
+
+  // available renewable generation this hour
+  let sol = solarKw(hr.irr);
+  let wnd = windKw(hr.wind);
+
+  // Serve load with renewables up to the stability cap. Any excess is curtailed.
+  const renUsed = Math.min(sol+wnd, load*CFG.renPenetrationCap);
+  const curtailed = Math.max(0, sol+wnd-renUsed);
+  const totRen = sol+wnd || 1;
+  const solUsed = renUsed*sol/totRen, wndUsed = renUsed*wnd/totRen;
+  const socNowKwh = usable*soc/100;
+  const reserveKwh = usable*CFG.battMinSoc/100;
+  let deficit = Math.max(0, load-renUsed);
+  let battOut = Math.min(deficit, CFG.battMaxRateKw, Math.max(0,socNowKwh-reserveKwh));
+  deficit -= battOut;
+
+  // Diesel minimum loading can create surplus; only its load-serving portion
+  // belongs in the energy mix. Charge the battery with the rest if possible.
+  let diesel = 0, battIn = 0, dieselToLoad = 0, unmet = 0;
+  if(deficit > 1e-8){
+   diesel = Math.min(CFG.gensetRatedKw, Math.max(deficit, CFG.gensetRatedKw*CFG.gensetMinLoad));
+   dieselToLoad = Math.min(deficit, diesel);
+   unmet = Math.max(0, deficit-dieselToLoad);
+   battIn = Math.min(Math.max(0,diesel-dieselToLoad), CFG.battMaxRateKw,
+            Math.max(0,usable-(socNowKwh-battOut)));
+  }
+  // Cancel opposing battery flows: generator minimum output replaces discharge first.
+  const cancelled = Math.min(battIn,battOut);
+  battIn -= cancelled; battOut -= cancelled; dieselToLoad += cancelled;
+  soc = Math.max(0,Math.min(100,(socNowKwh+battIn-battOut)/usable*100));
+
+  // fuel accounting
+  const fOpt = fuelLph(diesel);
+  const fBase = fuelLph(Math.min(load,CFG.gensetRatedKw));     // baseline: diesel alone serves the whole load
+  optFuel += fOpt; baseFuel += fBase;
+
+  plan.push({...hr, sol:solUsed, wnd:wndUsed, battOut, battIn, diesel, dieselToLoad, unmet, soc,
+        curtailed, fuelLph:fOpt, renShare:load>0?(solUsed+wndUsed)/load:0});
+ }
+ return {plan, optFuel, baseFuel, endSoc:soc};
+}
+
+/* ---------- [7] RENDER ---------- */
+let charts={};
+function chart(id, cfg){
+ const canvas=document.getElementById(id);
+ if(typeof Chart==='undefined'){
+  canvas.hidden=true;
+  if(!canvas.parentElement.querySelector('.chart-unavailable')){
+   const message=document.createElement('p'); message.className='note chart-unavailable';
+   message.textContent='Chart unavailable offline. Calculations and the hourly plan remain available.';
+   canvas.parentElement.appendChild(message);
+  }
+  return;
+ }
+ if(charts[id]) charts[id].destroy();
+ charts[id]=new Chart(canvas,cfg);
+}
+const axis = {grid:{color:'#16283d'},ticks:{color:'#5c7590',font:{size:10}}};
+const baseOpts = {animation:false,responsive:true, interaction:{mode:'index',intersect:false},
+ plugins:{legend:{labels:{color:'#87a0b8',usePointStyle:true,boxWidth:8,font:{size:11}}},
+      tooltip:{backgroundColor:'#0f1b2e',borderColor:'#22384f',borderWidth:1,titleColor:'#e7f1fa',bodyColor:'#e7f1fa'}},
+ scales:{x:axis,y:axis}};
+
+function render(hist, wx, profile, result){
+ const p = result.plan, first = p[0];
+
+ /* --- headline decision --- */
+ const total = first.sol + first.wnd + first.battOut + first.dieselToLoad || 1;
+ const seg = [
+  {v:first.sol,   c:'var(--amber)', n:'Solar'},
+  {v:first.wnd,   c:'var(--violet)', n:'Wind'},
+  {v:first.battOut, c:'var(--batt)',  n:'Battery'},
+  {v:first.dieselToLoad, c:'var(--diesel)', n:'Diesel'}
+ ];
+ document.getElementById('mixbar').innerHTML = seg.map(s=>{
+  const pct=(s.v/total)*100;
+  return pct<1?'':`<div style="width:${pct}%;background:${s.c}">${pct>11?Math.round(pct)+'%':''}</div>`;
+ }).join('');
+
+ const renPct = Math.round(first.renShare*100);
+ let why = `Forecast load is <b>${first.load.toFixed(0)} kW</b> at <b>${first.temp.toFixed(1)}°C</b>. `;
+ if(first.sol+first.wnd > 0) why += `Renewables cover <b>${(first.sol+first.wnd).toFixed(0)} kW</b>. `;
+ else why += `No renewable generation available this hour. `;
+ if(first.battOut > 0.5) why += `Battery supplies <b>${first.battOut.toFixed(0)} kW</b> down toward its ${CFG.battMinSoc}% reserve. `;
+ if(first.diesel > 0.5) why += `Diesel supplies <b>${first.dieselToLoad.toFixed(0)} kW</b> to the load (generator output ${first.diesel.toFixed(0)} kW)`;
+ else why += `<b>Diesel stays off this hour.</b>`;
+ if(first.diesel>0.5 && first.battIn>0.5) why += `, running at its ${Math.round(CFG.gensetMinLoad*100)}% minimum load with the excess charging the battery rather than being wasted.`;
+ else if(first.diesel>0.5) why += `.`;
+ if(first.unmet > 0.01) why += ` <b>${first.unmet.toFixed(0)} kW remains unserved; increase generation capacity or reduce load.</b>`;
+ if(first.curtailed > 1) why += ` <span>${first.curtailed.toFixed(0)} kW of renewable output is curtailed to keep instantaneous renewable share under the ${Math.round(CFG.renPenetrationCap*100)}% stability cap.</span>`;
+ document.getElementById('rationale').innerHTML = why;
+
+ /* --- stat cards --- */
+ document.getElementById('sLoad').textContent = first.load.toFixed(0)+' kW';
+ document.getElementById('sLoadSub').textContent = `${profile.crew} crew · heating ${Math.max(0,(CFG.indoorSetpointC-first.temp)*CFG.heatCoeffKwPerC).toFixed(0)} kW of it`;
+ document.getElementById('sRen').textContent = renPct+'%';
+ document.getElementById('sSoc').textContent = first.soc.toFixed(0)+'%';
+ document.getElementById('sSocSub').textContent = `reserve floor ${CFG.battMinSoc}% · usable ${battUsableKwh(first.temp).toFixed(0)} kWh at ${first.temp.toFixed(0)}°C`;
+
+ const dailyOpt = result.optFuel;
+ const fuelOnHand=hist.live?hist.fuelLitres:CFG.fuelLitres;
+ const daysLeft = dailyOpt>0 ? fuelOnHand/dailyOpt : Infinity;
+ document.getElementById('sFuel').textContent = (fuelOnHand/1000).toFixed(1)+'k L';
+ document.getElementById('sFuelSub').textContent = `${Number.isFinite(daysLeft)?Math.round(daysLeft)+" days at current burn":"No diesel burn projected"} · ${CFG.daysToResupply} days to resupply`;
+
+ /* --- fuel panel --- */
+ const saved = result.baseFuel - result.optFuel;
+ const savedPct = result.baseFuel>0 ? (saved/result.baseFuel*100) : 0;
+ document.getElementById('fBase').textContent = result.baseFuel.toFixed(0)+' L';
+ document.getElementById('fOpt').textContent = result.optFuel.toFixed(0)+' L';
+ document.getElementById('fSave').textContent = savedPct.toFixed(0)+'%';
+ document.getElementById('fSaveSub').textContent = `${saved.toFixed(0)} L/day · ${(saved*365/1000).toFixed(1)}k L/year at this profile`;
+
+ /* --- dispatch stacked chart --- */
+ const lbl = p.map(r=>String(r.clock).padStart(2,'0')+':00');
+ chart('dispatchChart', {type:'bar', data:{labels:lbl, datasets:[
+  {label:'Solar',  data:p.map(r=>r.sol),   backgroundColor:'#f5a623'},
+  {label:'Wind',  data:p.map(r=>r.wnd),   backgroundColor:'#a78bfa'},
+  {label:'Battery', data:p.map(r=>r.battOut), backgroundColor:'#5eead4'},
+  {label:'Diesel', data:p.map(r=>r.dieselToLoad), backgroundColor:'#f2664f'},
+  {label:'Load', type:'line', stack:'load-reference', data:p.map(r=>r.load), borderColor:'#e7f1fa', borderWidth:2,
+   pointRadius:0, tension:.3, borderDash:[4,3]}
+ ]}, options:{...baseOpts, scales:{x:{...axis,stacked:true},
+   y:{...axis,stacked:true,title:{display:true,text:'kW',color:'#5c7590',font:{size:10}}}}}});
+
+ /* --- load chart --- */
+ chart('loadChart', {type:'line', data:{labels:lbl, datasets:[
+  {label:'Forecast load (kW)', data:p.map(r=>r.load), borderColor:'#e7f1fa', backgroundColor:'rgba(231,241,250,.06)',
+   fill:true, tension:.35, pointRadius:0, borderWidth:2},
+  {label:'Heating component (kW)', data:p.map(r=>Math.max(0,(CFG.indoorSetpointC-r.temp)*CFG.heatCoeffKwPerC)),
+   borderColor:'#8fd0ff', tension:.35, pointRadius:0, borderWidth:2, borderDash:[5,4]}
+ ]}, options:baseOpts});
+
+ /* --- renewable chart --- */
+ chart('renChart', {type:'line', data:{labels:lbl, datasets:[
+  {label:'Solar available (kW)', data:p.map(r=>solarKw(r.irr)), borderColor:'#f5a623',
+   backgroundColor:'rgba(245,166,35,.08)', fill:true, tension:.35, pointRadius:0, borderWidth:2},
+  {label:'Wind available (kW)', data:p.map(r=>windKw(r.wind)), borderColor:'#a78bfa',
+   backgroundColor:'rgba(167,139,250,.08)', fill:true, tension:.35, pointRadius:0, borderWidth:2}
+ ]}, options:baseOpts});
+
+ /* --- weather chart --- */
+ const wxLabels = hist.labels.concat(wx.labels);
+ const pad = n => new Array(hist.labels.length-1).fill(null);
+ chart('wxChart', {type:'line', data:{labels:wxLabels, datasets:[
+  {label:'Temp history (°C)', data:hist.temp.concat(new Array(FORE_DAYS).fill(null)),
+   borderColor:'#8fd0ff', tension:.35, pointRadius:0, borderWidth:2},
+  {label:'Temp forecast (°C)', data:pad().concat([hist.temp.at(-1)]).concat(wx.temp),
+   borderColor:'#8fd0ff', borderDash:[5,4], tension:.35, pointRadius:0, borderWidth:2},
+  {label:'Wind history (km/h)', data:hist.wind.concat(new Array(FORE_DAYS).fill(null)),
+   borderColor:'#a78bfa', tension:.35, pointRadius:0, borderWidth:2},
+  {label:'Wind forecast (km/h)', data:pad().concat([hist.wind.at(-1)]).concat(wx.wind),
+   borderColor:'#a78bfa', borderDash:[5,4], tension:.35, pointRadius:0, borderWidth:2}
+ ]}, options:baseOpts});
+
+ /* --- hourly table --- */
+ let html = `<thead><tr><th>Hour</th><th>Load kW</th><th>Temp °C</th><th>Solar</th><th>Wind</th>
+  <th>Battery</th><th>Diesel</th><th>SoC %</th><th>Fuel L/h</th></tr></thead><tbody>`;
+ p.slice(0,12).forEach(r=>{
+  html += `<tr><td class="num">${String(r.clock).padStart(2,'0')}:00</td>
+   <td class="num">${r.load.toFixed(0)}</td><td class="num">${r.temp.toFixed(1)}</td>
+   <td class="num" style="color:var(--amber)">${r.sol.toFixed(0)}</td>
+   <td class="num" style="color:var(--violet)">${r.wnd.toFixed(0)}</td>
+   <td class="num" style="color:var(--batt)">${r.battOut>0?'−'+r.battOut.toFixed(0):(r.battIn>0?'+'+r.battIn.toFixed(0):'0')}</td>
+   <td class="num" style="color:var(--diesel)">${r.dieselToLoad.toFixed(0)}</td>
+   <td class="num">${r.soc.toFixed(0)}</td>
+   <td class="num">${r.fuelLph.toFixed(1)}</td></tr>`;
+ });
+ document.getElementById('planTable').innerHTML = html+'</tbody>';
+
+ /* --- advisories (safety-first) --- */
+ const al=[];
+ const minSoc = Math.min(...p.map(r=>r.soc));
+ const dieselHours = p.filter(r=>r.diesel>0.5).length;
+ const maxRen = Math.max(...p.map(r=>r.renShare));
+ const coldest = Math.min(...p.map(r=>r.temp));
+ const curtailedTotal = p.reduce((a,r)=>a+r.curtailed,0);
+ const unmetTotal = p.reduce((a,r)=>a+r.unmet,0);
+ if(unmetTotal>0.01) al.push(['crit',`Forecast demand exceeds available generation by <b>${unmetTotal.toFixed(0)} kWh</b> over 24h. <span>The dispatch is infeasible: reduce load or increase generator capacity.</span>`]);
+
+ if(daysLeft < CFG.daysToResupply)
+  al.push(['crit',`Fuel will not last to resupply at this burn rate — <b>${Number.isFinite(daysLeft)?Math.round(daysLeft):"unlimited"} days</b> of fuel against <b>${CFG.daysToResupply}</b> until the next delivery. <span>Load shedding or a tighter dispatch policy is required, not optional.</span>`]);
+ else
+  al.push(['ok',`Fuel endurance <b>${Number.isFinite(daysLeft)?Math.round(daysLeft):"unlimited"} days</b> against ${CFG.daysToResupply} to resupply — <span>${Number.isFinite(daysLeft)?Math.round(daysLeft-CFG.daysToResupply):"unlimited"} days of margin at the current profile.</span>`]);
+
+ if(minSoc <= CFG.battMinSoc+2)
+  al.push(['warn',`Battery reaches its <b>${CFG.battMinSoc}% safety reserve</b> within the planning window. <span>The engine will not discharge below it — diesel is dispatched instead, by design.</span>`]);
+
+ if(coldest < -20)
+  al.push(['warn',`Cold snap to <b>${coldest.toFixed(0)}°C</b> forecast. <span>Usable battery capacity derates to ${battUsableKwh(coldest).toFixed(0)} kWh and heating load rises — both already reflected in the plan above.</span>`]);
+
+ if(maxRen >= CFG.renPenetrationCap-0.01)
+  al.push(['warn',`Renewable share hits the <b>${Math.round(CFG.renPenetrationCap*100)}% stability cap</b>; ${curtailedTotal.toFixed(0)} kWh curtailed over 24h. <span>Raising the cap needs grid-forming inverter capability — a hardware decision, not a software one.</span>`]);
+
+ if(dieselHours === 0)
+  al.push(['ok',`<b>Diesel-free for the full 24 hours</b> in this window. <span>Renewables plus stored energy cover forecast demand end to end.</span>`]);
+ else
+  al.push(['ok',`Diesel runs <b>${dieselHours} of 24 hours</b>, down from 24 under a diesel-only baseline. <span>Fewer run-hours also means less maintenance and longer genset life.</span>`]);
+
+ document.getElementById('alerts').innerHTML = al.map(([c,t])=>
+  `<div class="alert ${c}"><div class="dot"></div><p>${t}</p></div>`).join('');
+
+ /* --- annual track --- */
+ document.getElementById('todayMark').style.left = (dayOfYear/365*100)+'%';
+ const dl = daylightHours(dayOfYear);
+ const season = dl<2?'Polar night — no solar contribution available'
+        : dl>22?'Polar day — continuous solar window'
+        : dl>=12?'Lengthening daylight — spring transition'
+        :'Shortening daylight — autumn transition';
+ document.getElementById('seasonStatus').textContent = `${dl.toFixed(1)}h daylight · ${season}`;
+}
+
+/* ---------- CONFIG UI ---------- */
+const CFG_LABELS = {
+ battStartSoc:'Starting battery charge (%)',battMaxRateKw:'Battery power limit (kW)',windCutOutKmh:'Wind cutout (km/h)',fuelIdleCoeff:'Genset idle fuel coefficient',perCrewKw:'Load per crew member (kW)',
+ baseLoadKw:'Base load (kW)', scienceKw:'Science load (kW)', heatCoeffKwPerC:'Heating (kW per °C)',
+ crewWinter:'Winter crew', crewSummer:'Summer crew', indoorSetpointC:'Indoor setpoint (°C)',
+ solarAreaM2:'PV area (m²)', solarEff:'PV efficiency', soilingLoss:'Snow/ice loss',
+ windRatedKw:'Turbine rating (kW)', windCutInKmh:'Wind cut-in (km/h)', windRatedKmh:'Wind rated (km/h)',
+ battCapacityKwh:'Battery (kWh)', battMinSoc:'Reserve SoC (%)', battColdDerate:'Cold derate /°C',
+ gensetRatedKw:'Genset rating (kW)', gensetMinLoad:'Genset min load', fuelLoadCoeff:'Fuel L/h per kW',
+ fuelLitres:'Fuel on hand (L)', daysToResupply:'Days to resupply', renPenetrationCap:'Renewable cap'
+};
+function buildConfigUI(){
+ document.getElementById('cfgGrid').innerHTML = Object.keys(CFG_LABELS).map(k=>
+  `<div><label for="cfg_${k}">${CFG_LABELS[k]}</label><input type="number" step="any" id="cfg_${k}" value="${CFG[k]}"></div>`).join('');
+}
+function applyConfig(){
+ const next={...CFG};
+ for(const k of Object.keys(CFG_LABELS)){
+  const field=document.getElementById('cfg_'+k);
+  next[k]=Number(field.value);
+  if(!field.value.trim() || !Number.isFinite(next[k])) return configError(`Enter a valid number for ${CFG_LABELS[k]}.`);
+ }
+ const positive=['battCapacityKwh','gensetRatedKw','windRatedKmh'];
+ const nonnegative=['baseLoadKw','scienceKw','heatCoeffKwPerC','crewSummer','crewWinter','solarAreaM2','windRatedKw','windCutInKmh','battMaxRateKw','fuelLitres','daysToResupply','fuelIdleCoeff','perCrewKw'];
+ if(positive.some(k=>next[k]<=0) || nonnegative.some(k=>next[k]<0) ||
+   next.windCutInKmh>=next.windRatedKmh || next.windRatedKmh>=next.windCutOutKmh ||
+   next.battMinSoc<0 || next.battMinSoc>=100 || next.battColdDerate<0 || next.battColdDerate>1 || next.battStartSoc<next.battMinSoc || next.battStartSoc>100 ||
+   !Number.isInteger(next.crewSummer) || !Number.isInteger(next.crewWinter) ||
+   ['solarEff','soilingLoss','gensetMinLoad','renPenetrationCap'].some(k=>next[k]<0||next[k]>1) ||
+   next.gensetMinLoad===0 || next.renPenetrationCap===0 || next.fuelLoadCoeff<=0)
+  return configError('Check positive capacities, wind speed order, reserve, and fractions between 0 and 1.');
+ document.getElementById('cfgError').hidden=true;
+ CFG=next; return true;
+}
+function configError(message){const el=document.getElementById('cfgError');el.textContent=message;el.hidden=false;}
+function resetConfig(){ CFG={...DEFAULTS}; document.getElementById('cfgError').hidden=true; buildConfigUI(); }
+
+// Live simulation controller: the first dispatch interval becomes the next state.
+let timer=null, running=false, elapsed=0, consumed=0, simulationSoc=DEFAULTS.battStartSoc;
+let simulationFuel=DEFAULTS.fuelLitres, activeResult=null;
+const initialDate=new Date();
+function renderSimulation(){
+ dayOfYear=Math.floor((Date.UTC(now.getFullYear(),now.getMonth(),now.getDate())-Date.UTC(now.getFullYear(),0,1))/86400000);
+ document.getElementById('wxChart').closest('.panel').hidden=false;
+ const hist=simulate();
+ const scenario=document.getElementById('scenario').value;
+ if(scenario==='storm') hist.wind=hist.wind.map(()=>100);
+ const wx=forecastWeather(hist), profile=hourlyProfile(hist,wx);
+ profile.initialSoc=simulationSoc;
+ if(scenario==='custom') profile.hrs.forEach(h=>{h.load=testInputs.load;h.temp=testInputs.temp;h.irr=testInputs.solar;h.wind=testInputs.wind;});
+ if(scenario==='storm') profile.hrs.forEach(h=>{h.wind=100;h.irr*=0.15;});
+ if(scenario==='peak') profile.hrs.forEach(h=>h.load*=1.75);
+ // Live flag here is used only to display stateful fuel, never as a sensor claim.
+ activeResult=dispatch(profile);
+ render({...hist,live:true,fuelLitres:simulationFuel},wx,profile,activeResult);
+ document.getElementById('simClock').textContent=(running?'Running':'Paused')+' · '+now.toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})+' · simulated station time';
+ document.getElementById('elapsed').textContent=elapsed+' h';
+ document.getElementById('consumed').textContent=consumed.toFixed(1)+' L';
+ document.getElementById('currentSoc').textContent=simulationSoc.toFixed(1)+'%';
+ document.getElementById('playButton').textContent=running?'Pause':'Play';
+}
+function stepSimulation(){
+ if(mode!=='test' || !activeResult) return;
+ const first=activeResult.plan[0];
+ if(simulationFuel<first.fuelLph){running=false;clearInterval(timer);renderSimulation();document.getElementById('simClock').textContent='Simulation stopped: insufficient fuel for the next hour. Restart to refill.';return;}
+ simulationSoc=first.soc; simulationFuel-=first.fuelLph;consumed+=first.fuelLph;
+ elapsed++;now.setHours(now.getHours()+1);renderSimulation();
+}
+function scheduleSimulation(){clearInterval(timer);if(running)timer=setInterval(()=>{if(!document.hidden)stepSimulation();},Number(document.getElementById('speed').value));}
+function toggleSimulation(){if(mode!=='test'||!activeResult)return;running=!running;scheduleSimulation();renderSimulation();}
+function changeSpeed(){scheduleSimulation();}
+function restartSimulation(){
+ if(mode!=='test')return;
+ now=new Date(initialDate);now.setMinutes(0,0,0);
+ const scenario=document.getElementById('scenario').value;
+ if(scenario==='summer') now.setMonth(11,21);
+ if(scenario==='winter') now.setMonth(5,21);
+ elapsed=0;consumed=0;simulationSoc=CFG.battStartSoc;simulationFuel=CFG.fuelLitres;
+ renderSimulation();scheduleSimulation();
+}
+
+let mode='hardware', liveTimer=null, liveController=null, connectionGeneration=0;
+let testInputs={load:100,temp:-15,solar:400,wind:30};
+function status(message){document.getElementById('modeStatus').textContent=message;}
+function disconnectHardware(quiet=false){
+ ++connectionGeneration;clearTimeout(liveTimer);liveController?.abort();liveController=null;
+ document.getElementById('connectButton').disabled=false;
+ if(mode==='hardware')document.getElementById('results').hidden=true;
+ if(!quiet)status('Hardware mode · disconnected. No live data is being read.');
+}
+function chooseMode(next){
+ disconnectHardware(true);clearInterval(timer);running=false;activeResult=null;mode=next;
+ document.getElementById('results').hidden=true;
+ document.getElementById('comparisonPanel').hidden=next!=='test';
+ document.getElementById('hardwareSetup').hidden=next!=='hardware';
+ document.getElementById('customSetup').hidden=next!=='test';
+ for(const [id,value] of [['modeHardware','hardware'],['modeTest','test']]){
+  const button=document.getElementById(id);button.classList.toggle('active',next===value);button.setAttribute('aria-pressed',String(next===value));
+ }
+ status(next==='hardware'?'Hardware mode · disconnected. Enter the gateway URL and connect.':'Custom test mode · configure the values, then start your test.');
+}
+function showResults(){
+ document.getElementById('results').hidden=false;
+ document.getElementById('hardwareReadings').hidden=mode!=='hardware';
+ document.getElementById('testControls').hidden=mode!=='test';
+ document.getElementById('testTotals').hidden=mode!=='test';
+}
+function startCustomTest(){
+ if(mode!=='test'||!applyConfig())return;
+ const input={};
+ for(const [key,id] of Object.entries({load:'testLoad',temp:'testTemp',solar:'testSolar',wind:'testWind'})){
+ const raw=document.getElementById(id).value;input[key]=Number(raw);
+ if(!raw.trim()||!Number.isFinite(input[key]))return configError('Enter a finite number in every test condition.');
+ }
+ if(input.load<0||input.load>100000||input.temp< -90||input.temp>60||input.solar<0||input.solar>1500||input.wind<0||input.wind>400)return configError('Check test ranges: demand 0–100000 kW, temperature −90 to 60 °C, solar 0–1500 W/m², wind 0–400 km/h.');
+ testInputs=input;document.getElementById('cfgError').hidden=true;
+ document.getElementById('scenario').value='custom';running=true;showResults();restartSimulation();status('CUSTOM TEST · simulated readings from your configuration.');
+}
+function validateTelemetry(j){
+ if(!j||typeof j!=='object')throw new Error('Gateway response must be a JSON object.');
+ const limits={loadKw:[0,100000],solarWm2:[0,1500],windKmh:[0,400],tempC:[-90,60],soc:[0,100],fuelLitres:[0,100000000]};
+ for(const [key,[min,max]] of Object.entries(limits))if(!Number.isFinite(j[key])||j[key]<min||j[key]>max)throw new Error('Invalid or missing telemetry field: '+key);
+ const time=typeof j.timestamp==='string'?Date.parse(j.timestamp):NaN;
+ if(!Number.isFinite(time)||Date.now()-time>120000||time-Date.now()>30000)throw new Error('Telemetry timestamp is missing, stale, or in the future.');
+ return j;
+}
+async function connectHardware(){
+ if(mode!=='hardware'||!applyConfig())return;
+ let endpoint;
+ try{endpoint=new URL(document.getElementById('gatewayUrl').value.trim());if(!['http:','https:'].includes(endpoint.protocol)||endpoint.username||endpoint.password)throw new Error();}
+ catch(_){status('Enter a valid HTTP or HTTPS gateway URL without embedded credentials.');return;}
+ disconnectHardware(true);const generation=connectionGeneration;document.getElementById('connectButton').disabled=true;
+ status('Connecting to hardware…');
+ async function poll(){
+ if(generation!==connectionGeneration||mode!=='hardware')return;
+ liveController=new AbortController();const timeout=setTimeout(()=>liveController?.abort(),5000);
+ try{
+  const response=await fetch(endpoint.href,{signal:liveController.signal,cache:'no-store',credentials:'omit'});
+  if(!response.ok)throw new Error('Gateway returned HTTP '+response.status);
+  const j=validateTelemetry(await response.json());
+  storeBackendTelemetry({...j,source:'live-gateway'});
+  if(generation!==connectionGeneration||mode!=='hardware')return;
+  now=new Date();dayOfYear=Math.floor((Date.UTC(now.getFullYear(),now.getMonth(),now.getDate())-Date.UTC(now.getFullYear(),0,1))/86400000);
+  const hist={labels:['Previous estimate','Latest reading'],solar:[j.solarWm2,j.solarWm2],wind:[j.windKmh,j.windKmh],temp:[j.tempC,j.tempC],soc:j.soc,fuelLitres:j.fuelLitres,live:true};
+  const wx=forecastWeather(hist),profile=hourlyProfile(hist,wx);profile.initialSoc=j.soc;
+  profile.hrs.forEach(h=>{h.load=j.loadKw;h.temp=j.tempC;h.irr=j.solarWm2;h.wind=j.windKmh;});
+  showResults();render(hist,wx,profile,dispatch(profile));
+  // A snapshot cannot establish weather history; hide that chart in hardware mode.
+  document.getElementById('wxChart').closest('.panel').hidden=true;
+  for(const [id,value] of Object.entries({liveLoad:j.loadKw+' kW',liveSoc:j.soc+'%',liveTemp:j.tempC+' °C',liveFuel:j.fuelLitres+' L'}))document.getElementById(id).textContent=value;
+  status('LIVE HARDWARE · updated '+new Date(j.timestamp).toLocaleTimeString()+'. 24-hour dispatch assumes the latest load and weather persist.');
+  liveTimer=setTimeout(poll,5000);
+ }catch(error){
+  if(generation!==connectionGeneration||mode!=='hardware')return;
+  disconnectHardware(true);status('Hardware connection failed: '+(error.name==='AbortError'?'request timed out':error.message)+'. Check gateway availability and CORS. No simulated data is shown.');
+ }finally{clearTimeout(timeout);}
+ }
+ await poll();
+}
+/* Comparison model: fixed cold-derated capacity over the horizon, one-hour steps.
+  Both strategies use exactly the same physics, forecasts, and end-energy target. */
+const PLANNER_VERSION='1.0';
+let comparisonSnapshot=null;
+function comparisonPhysics(rows, initialSoc){
+ const capacity=Math.min(...rows.map(r=>battUsableKwh(r.temp)));
+ return {capacity,floor:capacity*CFG.battMinSoc/100,start:capacity*initialSoc/100,
+  rate:CFG.battMaxRateKw,eff:.95,rating:CFG.gensetRatedKw,min:CFG.gensetRatedKw*CFG.gensetMinLoad,
+  idle:CFG.fuelIdleCoeff,slope:CFG.fuelLoadCoeff,cap:CFG.renPenetrationCap};
+}
+function comparisonStep(hr,e,next,m){
+ const charge=Math.max(0,(next-e)/m.eff), discharge=Math.max(0,(e-next)*m.eff);
+ if(next<m.floor-1e-7||next>m.capacity+1e-7||charge>m.rate+1e-7||discharge>m.rate+1e-7)return null;
+ const available=solarKw(hr.irr)+windKw(hr.wind);
+ const renewable=Math.min(available,hr.load*m.cap);
+ const surplus=Math.max(0,available-renewable);
+ const renewableCharge=Math.min(charge,surplus);
+ const required=hr.load-renewable+charge-renewableCharge-discharge;
+ // Do not discharge into an already satisfied load.
+ if(required< -1e-7)return null;
+ const diesel=required>1e-7?Math.min(m.rating,Math.max(required,m.min)):0;
+ const unmet=Math.max(0,required-diesel),dump=Math.max(0,diesel-required);
+ const fuel=diesel>0?m.idle*m.rating+m.slope*diesel:0;
+ return {...hr,e,next,charge,discharge,available,renewable,renewableCharge,diesel,unmet,dump,
+ curtailed:Math.max(0,surplus-renewableCharge),fuel,soc:next/m.capacity*100};
+}
+function greedyComparison(rows,m){
+ let e=m.start;const plan=[];
+ for(const hr of rows){
+ const available=solarKw(hr.irr)+windKw(hr.wind),used=Math.min(available,hr.load*m.cap);
+ const deficit=hr.load-used,surplus=available-used;
+ let next;
+ // Never charge and discharge simultaneously. Use surplus when no deficit exists.
+ if(deficit>1e-7) next=e-Math.min(deficit,m.rate,Math.max(0,e-m.floor)*m.eff)/m.eff;
+ else next=e+Math.min(surplus,m.rate,Math.max(0,m.capacity-e)/m.eff)*m.eff;
+ let step=comparisonStep(hr,e,next,m);if(!step)throw Error('Baseline state is infeasible.');
+ // Give the simple rule the same opportunity to absorb generator minimum output.
+ if(step.dump>1e-7){
+  const cancelled=Math.min(step.dump,step.discharge);
+  next+=cancelled/m.eff;
+  if(step.discharge-cancelled<1e-7){
+   const extra=Math.min(step.dump-cancelled,Math.max(0,m.rate-step.charge),Math.max(0,m.capacity-next)/m.eff);
+   next+=extra*m.eff;
+  }
+  step=comparisonStep(hr,e,next,m);
+ }
+ plan.push(step);e=next;
+ }
+ return summarizeComparison(plan);
+}
+function summarizeComparison(plan){return {plan,fuel:plan.reduce((s,r)=>s+r.fuel,0),unmet:plan.reduce((s,r)=>s+r.unmet,0),end:plan.at(-1).next,
+ minSoc:Math.min(...plan.map(r=>r.soc)),hours:plan.filter(r=>r.diesel>1e-7).length};}
+function betterPath(a,b){return !b||a.unmet<b.unmet-1e-7||(Math.abs(a.unmet-b.unmet)<=1e-7&&a.fuel<b.fuel-1e-7);}
+function predictiveComparison(rows,m,baseline){
+ // Include every baseline state so the grid always contains the baseline path.
+ const states=[m.start,baseline.end,...baseline.plan.map(r=>r.next),...Array.from({length:81},(_,i)=>m.floor+(m.capacity-m.floor)*i/80)].sort((a,b)=>a-b).filter((v,i,a)=>!i||v-a[i-1]>1e-9);
+ const nearest=e=>states.reduce((best,v,i)=>Math.abs(v-e)<Math.abs(states[best]-e)?i:best,0);
+ const first=nearest(m.start),target=nearest(baseline.end);
+ let layer=Array(states.length).fill(null);layer[first]={fuel:0,unmet:0};const parents=[];
+ for(const hr of rows){
+ const nextLayer=Array(states.length).fill(null),prevs=Array(states.length).fill(-1);
+ for(let i=0;i<states.length;i++)if(layer[i])for(let j=0;j<states.length;j++){
+  const r=comparisonStep(hr,states[i],states[j],m);if(!r)continue;
+  const candidate={fuel:layer[i].fuel+r.fuel,unmet:layer[i].unmet+r.unmet};
+  if(betterPath(candidate,nextLayer[j])){nextLayer[j]=candidate;prevs[j]=i;}
+ }
+ parents.push(prevs);layer=nextLayer;
+ }
+ if(!layer[target])throw Error('No feasible terminal battery state was found.');
+ const plan=[];let index=target;
+ for(let h=rows.length-1;h>=0;h--){const previous=parents[h][index];if(previous<0)throw Error('Planner path incomplete.');plan.unshift(comparisonStep(rows[h],states[previous],states[index],m));index=previous;}
+ return {...summarizeComparison(plan),states:states.length};
+}
+function buildComparisonRows(caseName){
+ const hrs=Array.from({length:24},(_,h)=>({h,clock:h,load:testInputs.load,temp:testInputs.temp,irr:testInputs.solar,wind:testInputs.wind}));
+ if(caseName==='storm')hrs.forEach(r=>{r.load=r.h<8?55:r.h<18?150:80;r.wind=r.h<8?45:r.h<18?100:25;r.irr=r.h<8?500:0;r.temp=-20;});
+ if(caseName==='winter')hrs.forEach(r=>{r.load=r.h<7?65:r.h<20?125:75;r.wind=20;r.irr=0;r.temp=-30;});
+ if(caseName==='summer')hrs.forEach(r=>{r.load=r.h<6?45:r.h<18?110:70;r.irr=Math.max(0,850*Math.cos((r.h-12)*Math.PI/24));r.wind=43;r.temp=-5;});
+ return hrs;
+}
+function runComparison(){
+ if(mode!=='test')return;
+ if(!applyConfig())return;
+ const keys={load:'testLoad',temp:'testTemp',solar:'testSolar',wind:'testWind'};const values={};
+ for(const [k,id]of Object.entries(keys)){const raw=document.getElementById(id).value;values[k]=Number(raw);if(!raw.trim()||!Number.isFinite(values[k]))return configError('Enter all custom test conditions before comparing.');}
+ if(values.load<0||values.load>100000||values.temp< -90||values.temp>60||values.solar<0||values.solar>1500||values.wind<0||values.wind>400)return configError('Test conditions are outside the supported ranges.');
+ testInputs=values;running=false;clearInterval(timer);if(activeResult)renderSimulation();
+ const name=document.getElementById('compareScenario').value;
+ try{
+ const rows=buildComparisonRows(name),physics=comparisonPhysics(rows,CFG.battStartSoc);
+ const baseline=greedyComparison(rows,physics),predictive=predictiveComparison(rows,physics,baseline);
+ comparisonSnapshot={version:PLANNER_VERSION,createdAt:new Date().toISOString(),scenario:name,config:{...CFG},physics,rows,baseline,predictive};
+ renderComparison();
+ }catch(error){document.getElementById('comparisonMessage').textContent='Comparison could not complete: '+error.message;}
+}
+function renderComparison(){
+ const c=comparisonSnapshot,a=c.baseline,b=c.predictive,m=c.physics;
+ document.getElementById('comparisonOutput').hidden=false;
+ const safe=a.unmet<1e-6&&b.unmet<1e-6,delta=a.fuel-b.fuel,pct=a.fuel>1e-7?100*delta/a.fuel:0;
+ document.getElementById('comparisonMessage').textContent=safe?(delta>.1?`Predictive scheduling uses ${delta.toFixed(1)} L less fuel (${pct.toFixed(1)}%) in this modelled 24-hour case.`:'No meaningful fuel improvement in this case. The comparison does not assume the planner always saves fuel.'):'Demand is not fully served. A fuel-saving percentage is not a valid success claim for this case; review unmet energy below.';
+ const metrics=[['Fuel consumed (L)',a.fuel.toFixed(1),b.fuel.toFixed(1)],['Unmet demand (kWh)',a.unmet.toFixed(2),b.unmet.toFixed(2)],['Minimum battery charge (%)',a.minSoc.toFixed(1),b.minSoc.toFixed(1)],['End battery charge (%)',(a.end/m.capacity*100).toFixed(2),(b.end/m.capacity*100).toFixed(2)],['Generator running hours',a.hours,b.hours]];
+ document.getElementById('comparisonMetrics').innerHTML='<thead><tr><th>24-hour result</th><th>Simple rule</th><th>Predictive planner</th></tr></thead><tbody>'+metrics.map(r=>'<tr>'+r.map(x=>'<td>'+x+'</td>').join('')+'</tr>').join('')+'</tbody>';
+ document.getElementById('comparisonAssumptions').textContent=`${Math.max(a.fuel,b.fuel)>c.config.fuelLitres?'Fuel inventory is insufficient for at least one schedule; increase available fuel before treating it as executable. ':''}Both start at ${(m.start/m.capacity*100).toFixed(1)}% battery and end at ${(a.end/m.capacity*100).toFixed(2)}%. Fixed cold-derated capacity: ${m.capacity.toFixed(1)} kWh. Charge/discharge efficiency: 95% each way. Search: ${b.states} battery states. Same forecasts, equipment limits, reserve, and fuel curve for both. Created ${new Date(c.createdAt).toLocaleString()}.`;
+ chart('comparisonChart',{type:'line',data:{labels:c.rows.map(r=>String(r.clock).padStart(2,'0')+':00'),datasets:[{label:'Simple rule battery %',data:a.plan.map(r=>r.soc),borderColor:'#f2664f'},{label:'Predictive battery %',data:b.plan.map(r=>r.soc),borderColor:'#5eead4'}]},options:baseOpts});
+ const first=b.plan[0],later=b.plan.find((r,i)=>r.soc>a.plan[i].soc+2);
+ let explanation=`First-hour generator output: ${first.diesel.toFixed(1)} kW; battery discharge: ${first.discharge.toFixed(1)} kW; battery charging: ${first.charge.toFixed(1)} kW. `;
+ explanation+=later?`The planner holds more battery energy than the simple rule at hour ${later.h+1}, considering the remaining forecast and the required ending charge.`:'The available forecast offers little or no advantage from holding extra battery energy.';
+ document.getElementById('plannerExplanation').textContent=explanation;
+}
+function exportComparison(){
+ if(!comparisonSnapshot)return;
+ const c=comparisonSnapshot;
+ const header=['model_version','created_at','scenario','strategy','hour','load_kw','temperature_c','irradiance_wm2','wind_kmh','renewable_to_load_kw','renewable_charge_kw','battery_charge_kw','battery_discharge_kw','battery_end_kwh','generator_kw','unmet_kwh','curtailed_kwh','dumped_kwh','fuel_litres','capacity_kwh','reserve_kwh','efficiency','start_kwh','target_end_kwh','generator_rating_kw','minimum_generator_kw','battery_rate_kw','idle_fuel_coefficient','load_fuel_coefficient','renewable_load_cap','configuration_json'];
+ const lines=[header];for(const strategy of ['baseline','predictive'])for(const r of c[strategy].plan){const m=c.physics;lines.push([c.version,c.createdAt,c.scenario,strategy,r.h+1,r.load,r.temp,r.irr,r.wind,r.renewable,r.renewableCharge,r.charge,r.discharge,r.next,r.diesel,r.unmet,r.curtailed,r.dump,r.fuel,m.capacity,m.floor,m.eff,m.start,c.baseline.end,m.rating,m.min,m.rate,m.idle,m.slope,m.cap,JSON.stringify(c.config)]);}
+ const csv=lines.map(r=>r.map(v=>'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\r\n');
+ const link=document.createElement('a'),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));link.href=url;link.download='PolarGrid-Comparison.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+
+
+/* ---------- [8] PYTHON BACKEND / AI EVIDENCE PIPELINE ---------- */
+let backendForecast=null, backendPlan=null;
+async function backendApi(path,options={}){
+ const response=await fetch(path,{cache:'no-store',headers:{'Content-Type':'application/json',...(options.headers||{})},...options});
+ let body={};try{body=await response.json();}catch(_){body={error:'Backend returned a non-JSON response.'};}
+ if(!response.ok)throw new Error(body.error||('HTTP '+response.status));return body;
+}
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function fmtMae(v){return Number.isFinite(Number(v))?Number(v).toFixed(2)+' kW':'—';}
+async function refreshBackend(){
+ try{
+ const s=await backendApi('/api/health');
+ document.getElementById('backendStatus').textContent='Backend online · telemetry database ready · '+(s.model_file_present?'trained model available':'model not trained yet')+'.';
+ document.getElementById('bmRows').textContent=s.telemetry_count;
+ const m=s.model;document.getElementById('bmModel').textContent=m?m.selected_model.replaceAll('_',' '):'not trained';
+ document.getElementById('bmAiMae').textContent=m?fmtMae(m.metrics.random_forest_test_mae_kw):'—';
+ document.getElementById('bmBaseMae').textContent=m?fmtMae(m.metrics.baseline_test_mae_kw):'—';
+ }catch(error){document.getElementById('backendStatus').textContent='Python backend not reachable. Start this project with Start-PolarGrid.bat. '+error.message;}
+}
+async function importHistoryCsv(){
+ const input=document.getElementById('historyCsv');if(!input.files.length){document.getElementById('backendStatus').textContent='Choose a telemetry CSV first.';return;}
+ try{
+ document.getElementById('backendStatus').textContent='Importing telemetry history…';
+ const csv=await input.files[0].text(),r=await backendApi('/api/import/csv',{method:'POST',body:JSON.stringify({csv})});
+ document.getElementById('backendStatus').textContent=`Imported ${r.imported} rows${r.errors.length?' with '+r.errors.length+' rejected row(s)':''}. You can train the forecaster now.`;
+ await refreshBackend();
+ }catch(error){document.getElementById('backendStatus').textContent='CSV import failed: '+error.message;}
+}
+async function trainBackendAI(){
+ try{
+ document.getElementById('backendStatus').textContent='Training and evaluating chronologically…';
+ const r=await backendApi('/api/forecast/train',{method:'POST',body:'{}'}),m=r.metrics;
+ document.getElementById('backendStatus').textContent=`Training complete. Selected ${r.selected_model.replaceAll('_',' ')} using the validation period. Final test: RF ${m.random_forest_test_mae_kw.toFixed(2)} kW MAE vs previous-day baseline ${m.baseline_test_mae_kw.toFixed(2)} kW.`;
+ await refreshBackend();
+ }catch(error){document.getElementById('backendStatus').textContent='Training failed: '+error.message;}
+}
+function renderBackendForecast(f){
+ document.getElementById('backendForecastBox').hidden=false;
+ document.getElementById('backendForecastNote').textContent=`24-hour load forecast from ${f.selected_model.replaceAll('_',' ')}. Weather inputs repeat the latest observed 24-hour profile for this prototype; replace them with station weather forecasts in field deployment.`;
+ document.getElementById('backendForecastTable').innerHTML='<thead><tr><th>Hour</th><th>Forecast load</th><th>Temp</th><th>Solar</th><th>Wind</th></tr></thead><tbody>'+f.forecast.map(r=>`<tr><td>${esc(new Date(r.timestamp).toLocaleString())}</td><td class="num">${r.loadKw.toFixed(1)} kW</td><td class="num">${r.tempC.toFixed(1)} °C</td><td class="num">${r.solarWm2.toFixed(0)} W/m²</td><td class="num">${r.windKmh.toFixed(1)} km/h</td></tr>`).join('')+'</tbody>';
+}
+function renderBackendPlan(p){
+ backendPlan=p;document.getElementById('backendPlanBox').hidden=false;
+ const a=p.baseline,b=p.predictive,delta=p.fuelSavingsLitres;
+ document.getElementById('backendPlanSummary').textContent=`Predictive schedule: ${b.fuelLitres.toFixed(1)} L fuel, ${b.unmetKwh.toFixed(2)} kWh unmet demand, minimum battery ${b.minSoc.toFixed(1)}%. Compared with the same-physics simple rule: ${delta>=0?delta.toFixed(1)+' L less fuel':Math.abs(delta).toFixed(1)+' L more fuel'}. ${p.executable?'Demand is fully served in the model.':'Demand is not fully served; do not treat this plan as executable.'} Operator approval is still required.`;
+ document.getElementById('backendPlanTable').innerHTML='<thead><tr><th>Hour</th><th>Load</th><th>Renewable</th><th>Battery</th><th>Generator</th><th>Fuel</th><th>End SoC</th></tr></thead><tbody>'+b.plan.map(r=>`<tr><td>${r.hour}</td><td class="num">${r.loadKw.toFixed(1)}</td><td class="num">${r.renewableToLoadKw.toFixed(1)}</td><td class="num">${(r.batteryDischargeKw-r.batteryChargeKw).toFixed(1)}</td><td class="num">${r.generatorKw.toFixed(1)}</td><td class="num">${r.fuelLitres.toFixed(1)} L</td><td class="num">${r.soc.toFixed(1)}%</td></tr>`).join('')+'</tbody>';
+ document.getElementById('approvalStatus').textContent='Plan '+p.planHash+' is awaiting operator review. No equipment command has been sent.';
+}
+async function generateBackendPlan(){
+ try{
+ document.getElementById('backendStatus').textContent='Generating 24-hour AI forecast and predictive dispatch…';
+ backendForecast=await backendApi('/api/forecast/24h');renderBackendForecast(backendForecast);
+ const r=await backendApi('/api/plan',{method:'POST',body:JSON.stringify({forecast:backendForecast.forecast,config:CFG})});renderBackendPlan(r);
+ document.getElementById('backendStatus').textContent='AI forecast and predictive plan generated. Review the evidence below before approving.';
+ }catch(error){document.getElementById('backendStatus').textContent='Plan generation failed: '+error.message;}
+}
+async function logBackendDecision(decision){
+ if(!backendPlan){document.getElementById('approvalStatus').textContent='Generate a plan first.';return;}
+ try{
+ const operator=document.getElementById('operatorName').value.trim()||'Demo operator',note=document.getElementById('operatorNote').value.trim();
+ const r=await backendApi('/api/approval',{method:'POST',body:JSON.stringify({planHash:backendPlan.planHash,decision,operator,note})});
+ document.getElementById('approvalStatus').textContent=`${decision==='approved'?'Approved':'Rejected'} by ${operator}. Audit record stored. Control commands sent: ${r.controlCommandsSent?'yes':'no'}.`;
+ await refreshBackend();
+ }catch(error){document.getElementById('approvalStatus').textContent='Could not log decision: '+error.message;}
+}
+function downloadBackendCsv(){window.location.href='/api/export/csv';}
+async function storeBackendTelemetry(j){
+ try{await backendApi('/api/telemetry/ingest',{method:'POST',body:JSON.stringify(j)});}catch(_){/* hardware display stays usable even if backend storage is offline */}
+}
+
+window.addEventListener('beforeunload',()=>{clearInterval(timer);disconnectHardware(true);});
+buildConfigUI();
+chooseMode('hardware');
+refreshBackend();
+</script>
+</body>
+</html>
