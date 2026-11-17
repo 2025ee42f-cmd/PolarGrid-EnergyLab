@@ -4,6 +4,17 @@ An interactive energy management and predictive dispatch prototype designed for 
 
 PolarGrid explores how renewable energy, battery storage, and diesel generation can be coordinated to support reliable power management in extreme environments.
 
+## Screenshots
+
+### Main Dashboard
+![PolarGrid Dashboard](screenshots/Dashboard.png)
+
+### Custom Test Configuration
+![Custom Test](screenshots/Custom-Test.png)
+
+### 24-Hour Strategy Comparison
+![Strategy Comparison](screenshots/Comparison.png)
+
 ## Features
 
 - **Dual operating modes:** Connect a telemetry gateway or configure custom test conditions.
